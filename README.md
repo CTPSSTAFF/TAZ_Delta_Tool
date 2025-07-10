@@ -12,3 +12,7 @@
 
 
 [^1 ]: TAZ Review Process [Google Doc](https://docs.google.com/document/d/1q5Q8SPHKzowMdnqeh2hB790E6iaD4IZlLLCCEPYPyAY/edit?tab=t.0)
+
+### **Notes**
+Ensure proper projection
+gdf = gdf.to_crs(epsg=4326)

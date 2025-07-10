@@ -9,7 +9,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:turf/turf.dart' as turf;
 import 'package:r_tree/r_tree.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:archive/archive.dart'; 
+import 'package:archive/archive.dart';
 
 /// Helper: Generate a GeoJSON polygon approximating a circle.
 Map<String, dynamic> createCirclePolygon(turf.Point center, double radius,
@@ -88,7 +88,7 @@ Map<String, dynamic> standardizeGeoJsonProperties(
 SymbolLayerProperties createIdLabelProperties({
   required String textField,
   required String textColor,
-  double textSize = 14,
+  double textSize = 18,
   String textHaloColor = "#FFFFFF",
   double textHaloWidth = 0.5,
 }) {
@@ -126,8 +126,7 @@ List<dynamic> filterFeaturesWithinDistance(
     final centroidFeature = turf.centroid(f);
     final turf.Point centroid = centroidFeature.geometry as turf.Point;
     double distance =
-        (turf.distance(center, centroid, turf.Unit.kilometers))
-            .toDouble();
+        (turf.distance(center, centroid, turf.Unit.kilometers)).toDouble();
     if (distance <= radiusKm) {
       filtered.add(feature);
     }
@@ -253,6 +252,7 @@ class _DashboardPageState extends State<DashboardPage> {
   Map<String, dynamic>? _cachedOldTaz;
   Map<String, dynamic>? _cachedNewTaz;
   Map<String, dynamic>? _cachedBlocks;
+  Map<String, dynamic>? _cachedMassTowns; // Add cached Mass Towns GeoJSON
 
   // Spatial index for blocks.
   RTree<dynamic>? _blocksIndex;
@@ -314,6 +314,7 @@ class _DashboardPageState extends State<DashboardPage> {
   bool _uploadedOldTaz = false;
   bool _uploadedNewTaz = false;
   bool _uploadedBlocks = false;
+  bool _uploadedMassTowns = false; // Add upload status for Mass Towns
 
   // New flags to indicate overall file readiness and if a file is currently processing.
   bool _filesReady = false;
@@ -322,10 +323,11 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    // Check if all three files already exist in local storage.
+    // Check if all four files already exist in local storage.
     bool allUploaded = html.window.localStorage.containsKey('old_taz_geojson') &&
         html.window.localStorage.containsKey('new_taz_geojson') &&
-        html.window.localStorage.containsKey('blocks_geojson');
+        html.window.localStorage.containsKey('blocks_geojson') &&
+        html.window.localStorage.containsKey('mass_towns_geojson'); // Check for Mass Towns
     if (allUploaded) {
       _filesReady = true;
       _loadCachedData().then((_) {
@@ -338,15 +340,15 @@ class _DashboardPageState extends State<DashboardPage> {
       _isLoading = false;
     }
   }
-  
+
   @override
   void dispose() {
     _newTableHorizontalScrollController.dispose();
     _blocksTableHorizontalScrollController.dispose();
     super.dispose();
   }
-  
-  /// Pulls demo data from assets/geojsons.zip, extracts the three GeoJSON files,
+
+  /// Pulls demo data from assets/geojsons.zip, extracts the GeoJSON files,
   /// standardises their properties, caches them in localStorage + memory, and
   /// kicks off the normal _loadCachedData() pipeline.
   Future<void> _loadDemoData() async {
@@ -358,42 +360,54 @@ class _DashboardPageState extends State<DashboardPage> {
         final name = file.name.toLowerCase();
         final contentBytes = file.content as List<int>;
         final geo = jsonDecode(utf8.decode(contentBytes)) as Map<String, dynamic>;
-        final standardized = standardizeGeoJsonProperties(
-          geo,
-          name.endsWith('old_taz.geojson')
-              ? 'old_taz'
-              : name.endsWith('new_taz.geojson')
-                  ? 'new_taz'
-                  : 'blocks',
-        );
+
+        String featureType;
+        String localStorageKey;
+
+        if (name.endsWith('old_taz.geojson')) {
+          featureType = 'old_taz';
+          localStorageKey = 'old_taz_geojson';
+        } else if (name.endsWith('new_taz.geojson')) {
+          featureType = 'new_taz';
+          localStorageKey = 'new_taz_geojson';
+        } else if (name.endsWith('blocks.geojson')) {
+          featureType = 'blocks';
+          localStorageKey = 'blocks_geojson';
+        } else if (name.endsWith('mass_towns.geojson')) { // Handle mass_towns.geojson
+          featureType = 'mass_towns';
+          localStorageKey = 'mass_towns_geojson';
+        } else {
+          continue; // Skip unknown files
+        }
+
+        final standardized = standardizeGeoJsonProperties(geo, featureType);
+
         // Only try to write to localStorage if the payload is small:
         if (contentBytes.length <= 5 * 1024 * 1024) {
           try {
-            final key = name.endsWith('old_taz.geojson')
-                ? 'old_taz_geojson'
-                : name.endsWith('new_taz.geojson')
-                    ? 'new_taz_geojson'
-                    : 'blocks_geojson';
-            html.window.localStorage[key] = jsonEncode(standardized);
+            html.window.localStorage[localStorageKey] = jsonEncode(standardized);
           } catch (e) {
             debugPrint('⚠️ skipping localStorage for $name: $e');
           }
         }
         // Always keep it in memory and flip the upload flag:
-        if (name.endsWith('old_taz.geojson')) {
+        if (featureType == 'old_taz') {
           _cachedOldTaz = standardized;
           _uploadedOldTaz = true;
-        } else if (name.endsWith('new_taz.geojson')) {
+        } else if (featureType == 'new_taz') {
           _cachedNewTaz = standardized;
           _uploadedNewTaz = true;
-        } else {
+        } else if (featureType == 'blocks') {
           _cachedBlocks = standardized;
           _uploadedBlocks = true;
+        } else if (featureType == 'mass_towns') { // Set cached data for Mass Towns
+          _cachedMassTowns = standardized;
+          _uploadedMassTowns = true;
         }
       }
 
-      // Once all three are in memory, flip the screen over to the dashboard:
-      if (_uploadedOldTaz && _uploadedNewTaz && _uploadedBlocks) {
+      // Once all four are in memory, flip the screen over to the dashboard:
+      if (_uploadedOldTaz && _uploadedNewTaz && _uploadedBlocks && _uploadedMassTowns) {
         setState(() {
           _filesReady = true;
           _isLoading = true;
@@ -419,6 +433,8 @@ class _DashboardPageState extends State<DashboardPage> {
     if (_cachedNewTaz != null) _uploadedNewTaz = true;
     _cachedBlocks ??= _loadGeoJsonFromLocal('blocks_geojson', "blocks");
     if (_cachedBlocks != null) _uploadedBlocks = true;
+    _cachedMassTowns ??= _loadGeoJsonFromLocal('mass_towns_geojson', "mass_towns"); // Load Mass Towns
+    if (_cachedMassTowns != null) _uploadedMassTowns = true;
 
     // Build the R-Tree index for blocks if available.
     if (_cachedBlocks != null && _cachedBlocks!['features'] != null) {
@@ -477,9 +493,9 @@ class _DashboardPageState extends State<DashboardPage> {
       return math.Rectangle<double>(0, 0, 0, 0);
     }
 
-    final left   = minLng ?? 0;
+    final left = minLng ?? 0;
     final bottom = minLat ?? 0;
-    final width  = (maxLng ?? 0) - left;
+    final width = (maxLng ?? 0) - left;
     final height = (maxLat ?? 0) - bottom;
 
     return math.Rectangle<double>(left, bottom, width, height);
@@ -723,6 +739,7 @@ class _DashboardPageState extends State<DashboardPage> {
   String? _oldTazFileName;
   String? _newTazFileName;
   String? _blocksFileName;
+  String? _massTownsFileName; // Add filename for Mass Towns
 
   void _uploadGeoJson(String type) {
     final input = html.FileUploadInputElement()..accept = '.geojson';
@@ -742,10 +759,10 @@ class _DashboardPageState extends State<DashboardPage> {
         await reader.onLoad.first;
         Map<String, dynamic> geojsonData =
             jsonDecode(reader.result as String) as Map<String, dynamic>;
-        
+
         // Standardize property names: convert all keys to lowercase (and apply renaming logic)
         geojsonData = standardizeGeoJsonProperties(geojsonData, type);
-        
+
         // If the file is small enough, cache it in localStorage.
         if (file.size <= 5 * 1024 * 1024) {
           if (type == "old_taz") {
@@ -754,6 +771,8 @@ class _DashboardPageState extends State<DashboardPage> {
             html.window.localStorage['new_taz_geojson'] = jsonEncode(geojsonData);
           } else if (type == "blocks") {
             html.window.localStorage['blocks_geojson'] = jsonEncode(geojsonData);
+          } else if (type == "mass_towns") { // Cache Mass Towns
+            html.window.localStorage['mass_towns_geojson'] = jsonEncode(geojsonData);
           }
         }
         // In any case, store it in our in-memory cache and update the file name.
@@ -769,11 +788,16 @@ class _DashboardPageState extends State<DashboardPage> {
           _uploadedBlocks = true;
           _cachedBlocks = geojsonData;
           _blocksFileName = file.name;
+        } else if (type == "mass_towns") { // Update Mass Towns state
+          _uploadedMassTowns = true;
+          _cachedMassTowns = geojsonData;
+          _massTownsFileName = file.name;
         }
+
         setState(() {
           _isProcessingUpload = false;
         });
-        if (_uploadedOldTaz && _uploadedNewTaz && _uploadedBlocks) {
+        if (_uploadedOldTaz && _uploadedNewTaz && _uploadedBlocks && _uploadedMassTowns) {
           setState(() {
             _filesReady = true;
             _isLoading = true;
@@ -843,7 +867,7 @@ class _DashboardPageState extends State<DashboardPage> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Text("Please upload all three GeoJSON files to continue."),
+              const Text("Please upload all four GeoJSON files to continue."),
               if (_isProcessingUpload)
                 const Padding(
                   padding: EdgeInsets.all(16.0),
@@ -1084,6 +1108,7 @@ class _DashboardPageState extends State<DashboardPage> {
                             radius: _radius,
                             cachedOldTaz: _cachedOldTaz,
                             cachedBlocks: _cachedBlocks,
+                            cachedMassTowns: _cachedMassTowns, // Pass Mass Towns data
                             blocksIndex: _blocksIndex,
                             showIdLabels: _showIdLabels,
                             // Automatic search on tap is disabled.
@@ -1094,10 +1119,10 @@ class _DashboardPageState extends State<DashboardPage> {
                             syncedCameraPosition: _isSyncEnabled ? _syncedCameraPosition : null,
                             onCameraIdleSync: _isSyncEnabled
                                 ? (CameraPosition pos) {
-                                    setState(() {
-                                      _syncedCameraPosition = pos;
-                                    });
-                                  }
+                                      setState(() {
+                                        _syncedCameraPosition = pos;
+                                      });
+                                    }
                                 : null,
                           ),
                         ),
@@ -1119,6 +1144,7 @@ class _DashboardPageState extends State<DashboardPage> {
                             cachedOldTaz: _cachedOldTaz,
                             cachedNewTaz: _cachedNewTaz,
                             cachedBlocks: _cachedBlocks,
+                            cachedMassTowns: _cachedMassTowns, // Pass Mass Towns data
                             blocksIndex: _blocksIndex,
                             selectedIds: _selectedNewTazIds,
                             showIdLabels: _showIdLabels,
@@ -1129,10 +1155,10 @@ class _DashboardPageState extends State<DashboardPage> {
                             syncedCameraPosition: _isSyncEnabled ? _syncedCameraPosition : null,
                             onCameraIdleSync: _isSyncEnabled
                                 ? (CameraPosition pos) {
-                                    setState(() {
-                                      _syncedCameraPosition = pos;
-                                    });
-                                  }
+                                      setState(() {
+                                        _syncedCameraPosition = pos;
+                                      });
+                                    }
                                 : null,
                           ),
                         ),
@@ -1284,15 +1310,16 @@ class _DashboardPageState extends State<DashboardPage> {
                             cachedOldTaz: _cachedOldTaz,
                             cachedNewTaz: _cachedNewTaz,
                             cachedBlocks: _cachedBlocks,
+                            cachedMassTowns: _cachedMassTowns, // Pass Mass Towns data
                             blocksIndex: _blocksIndex,
                             mapStyle: _mapStyles[_selectedMapStyleName],
                             syncedCameraPosition: _isSyncEnabled ? _syncedCameraPosition : null,
                             onCameraIdleSync: _isSyncEnabled
                                 ? (CameraPosition pos) {
-                                    setState(() {
-                                      _syncedCameraPosition = pos;
-                                    });
-                                  }
+                                      setState(() {
+                                        _syncedCameraPosition = pos;
+                                      });
+                                    }
                                 : null,
                           ),
                         ),
@@ -1314,6 +1341,7 @@ class _DashboardPageState extends State<DashboardPage> {
                             cachedOldTaz: _cachedOldTaz,
                             cachedNewTaz: _cachedNewTaz,
                             cachedBlocks: _cachedBlocks,
+                            cachedMassTowns: _cachedMassTowns, // Pass Mass Towns data
                             blocksIndex: _blocksIndex,
                             selectedIds: _selectedBlockIds,
                             onTazSelected: (int tappedId) {
@@ -1323,10 +1351,10 @@ class _DashboardPageState extends State<DashboardPage> {
                             syncedCameraPosition: _isSyncEnabled ? _syncedCameraPosition : null,
                             onCameraIdleSync: _isSyncEnabled
                                 ? (CameraPosition pos) {
-                                    setState(() {
-                                      _syncedCameraPosition = pos;
-                                    });
-                                  }
+                                      setState(() {
+                                        _syncedCameraPosition = pos;
+                                      });
+                                    }
                                 : null,
                             showIdLabels: _showIdLabels,
                           ),
@@ -1464,7 +1492,7 @@ class _DashboardPageState extends State<DashboardPage> {
       ),
     );
   }
-  
+
   /// Builds the three upload buttons, plus (when needed) the demo-data loader.
   Widget _buildUploadButtons() {
     return Container(
@@ -1495,7 +1523,7 @@ class _DashboardPageState extends State<DashboardPage> {
               onPressed: () => _uploadGeoJson("new_taz"),
             ),
           ),
-          
+
           // Blocks upload button.
           Tooltip(
             message: "Upload Blocks GeoJSON file",
@@ -1507,6 +1535,17 @@ class _DashboardPageState extends State<DashboardPage> {
               onPressed: () => _uploadGeoJson("blocks"),
             ),
           ),
+          // // Mass Towns upload button.
+          // Tooltip(
+          //   message: "Upload Mass Towns GeoJSON file",
+          //   child: IconButton(
+          //     icon: Icon(
+          //       Icons.cloud_upload,
+          //       color: _uploadedMassTowns ? Colors.lightGreen : Colors.red,
+          //     ),
+          //     onPressed: () => _uploadGeoJson("mass_towns"),
+          //   ),
+          // ),
         ],
       ),
     );
@@ -1525,6 +1564,7 @@ class MapView extends StatefulWidget {
   final Map<String, dynamic>? cachedOldTaz;
   final Map<String, dynamic>? cachedNewTaz;
   final Map<String, dynamic>? cachedBlocks;
+  final Map<String, dynamic>? cachedMassTowns; // Add cached Mass Towns GeoJSON
   final RTree<dynamic>? blocksIndex;
   final ValueChanged<int>? onTazSelected;
   final Set<int>? selectedIds;
@@ -1546,6 +1586,7 @@ class MapView extends StatefulWidget {
     this.cachedOldTaz,
     this.cachedNewTaz,
     this.cachedBlocks,
+    this.cachedMassTowns, // Add to constructor
     this.blocksIndex,
     this.onTazSelected,
     this.selectedIds,
@@ -1605,7 +1646,7 @@ class MapViewState extends State<MapView> {
             "old_taz_target_labels",
             createIdLabelProperties(
               textField: "{taz_id}",
-              textColor: "#F85B00",
+              textColor: "#FF00FF",
             ),
           );
           controller!.addSymbolLayer(
@@ -1711,17 +1752,17 @@ class MapViewState extends State<MapView> {
 
   String _buildLabelText() {
     // if (widget.mode == MapViewMode.newTaz || widget.mode == MapViewMode.combined || widget.mode == MapViewMode.blocks) {
-    //   return widget.title;
+    //    return widget.title;
     // } else if (widget.mode == MapViewMode.newTaz) {
-    //   return "${widget.title}\nTAZ: ${widget.selectedTazId ?? 'None'}";
+    //    return "${widget.title}\nTAZ: ${widget.selectedTazId ?? 'None'}";
     // } else if (widget.mode == MapViewMode.blocks) {
-    //   if (widget.selectedIds != null && widget.selectedIds!.isNotEmpty) {
-    //     return "${widget.title}\nSelected: ${widget.selectedIds!.join(', ')}";
-    //   } else {
-    //     return "${widget.title}\nSelected: None";
-    //   }
-    // } 
-    
+    //    if (widget.selectedIds != null && widget.selectedIds!.isNotEmpty) {
+    //      return "${widget.title}\nSelected: ${widget.selectedIds!.join(', ')}";
+    //    } else {
+    //      return "${widget.title}\nSelected: None";
+    //    }
+    // }
+
     if (widget.mode == MapViewMode.oldTaz) {
       return "${widget.title}\nTAZ: ${widget.selectedTazId ?? 'None'}";
     } else {
@@ -1758,6 +1799,9 @@ class MapViewState extends State<MapView> {
   Future<void> _loadLayers() async {
     if (controller == null) return;
     try {
+      // Load Mass Towns first, as a base layer
+      await _loadMassTownsLayer();
+
       if (widget.mode == MapViewMode.oldTaz) {
         await _loadOldTazLayers();
         await _loadRadiusCircle();
@@ -1769,7 +1813,7 @@ class MapViewState extends State<MapView> {
             "old_taz_target_labels",
             createIdLabelProperties(
               textField: "{taz_id}",
-              textColor: "#F85B00",
+              textColor: "#FF00FF",
             ),
           );
           await controller!.addSymbolLayer(
@@ -1789,8 +1833,8 @@ class MapViewState extends State<MapView> {
           "new_taz_source",
           "selected_new_taz_fill",
           FillLayerProperties(
-            fillColor: "#FFFF00",
-            fillOpacity: 0.5,
+            fillColor: "#FFFF00", // Vibrant yellow for selection
+            fillOpacity: 1,
           ),
           filter: (widget.selectedIds != null && widget.selectedIds!.isNotEmpty)
               ? ["in", "taz_id", ...widget.selectedIds!.toList()]
@@ -1818,8 +1862,8 @@ class MapViewState extends State<MapView> {
           "blocks_fill_source",
           "selected_blocks_fill",
           FillLayerProperties(
-            fillColor: "#FFFF00",
-            fillOpacity: 0.7,
+            fillColor: "#FFFF00", // Vibrant yellow for selection
+            fillOpacity: 1,
           ),
           filter: (widget.selectedIds != null && widget.selectedIds!.isNotEmpty)
               ? ["in", "geoid20", ...widget.selectedIds!.toList()]
@@ -1864,6 +1908,25 @@ class MapViewState extends State<MapView> {
     } catch (e) {
       debugPrint("Error loading layers for ${widget.mode}: $e");
     }
+  }
+
+  /// Loads the Mass Towns polygons with a light green boundary.
+  Future<void> _loadMassTownsLayer() async {
+    if (controller == null || widget.cachedMassTowns == null) return;
+
+    final massTownsData = widget.cachedMassTowns!;
+    await controller!.addSource(
+      "mass_towns_source",
+      GeojsonSourceProperties(data: massTownsData),
+    );
+    await controller!.addLineLayer(
+      "mass_towns_source",
+      "mass_towns_line",
+      LineLayerProperties(
+        lineColor: "#90EE90", // Light green color
+        lineWidth: 4.0, // Thick boundary
+      ),
+    );
   }
 
   /// Loads the Old TAZ polygons within the search radius and adds target and other TAZ layers.
@@ -1917,14 +1980,14 @@ class MapViewState extends State<MapView> {
       layerId: "old_taz_target_line",
       geojsonData: {'type': 'FeatureCollection', 'features': targetFeatures},
       lineColor: "#ff8000",
-      lineWidth: 2.0,
+      lineWidth: 4.0, // Thicker boundary
     );
     await _addGeoJsonSourceAndFillLayer(
       sourceId: "old_taz_target_fill_source",
       layerId: "old_taz_target_fill",
       geojsonData: {'type': 'FeatureCollection', 'features': targetFeatures},
-      fillColor: "#ff8000",
-      fillOpacity: 0.06,
+      fillColor: "#fff580",
+      fillOpacity: 1,
     );
 
     // The "other" TAZ polygons within the radius.
@@ -1933,14 +1996,14 @@ class MapViewState extends State<MapView> {
       layerId: "old_taz_others_line",
       geojsonData: {'type': 'FeatureCollection', 'features': otherFeatures},
       lineColor: "#4169E1",
-      lineWidth: 2.0,
+      lineWidth: 4.0, // Thicker boundary
     );
     await _addGeoJsonSourceAndFillLayer(
       sourceId: "old_taz_others_fill_source",
       layerId: "old_taz_others_fill",
       geojsonData: {'type': 'FeatureCollection', 'features': otherFeatures},
       fillColor: "#4169E1",
-      fillOpacity: 0.06,
+      fillOpacity: 0.006,
     );
 
     if (zoom) await _zoomToFeatureBounds(combinedData);
@@ -1999,14 +2062,14 @@ class MapViewState extends State<MapView> {
       layerId: "new_taz_line",
       geojsonData: filteredNewData,
       lineColor: "#FF0000",
-      lineWidth: 2.0,
+      lineWidth: 4.0, // Thicker boundary
     );
     await _addGeoJsonSourceAndFillLayer(
       sourceId: "new_taz_fill_source",
       layerId: "new_taz_fill",
       geojsonData: filteredNewData,
       fillColor: "#FF0000",
-      fillOpacity: 0.06,
+      fillOpacity: 0.006,
     );
 
     if (zoom) await _zoomToFeatureBounds(filteredNewData);
@@ -2034,7 +2097,7 @@ class MapViewState extends State<MapView> {
       "blocks_fill",
       FillLayerProperties(
         fillColor: "#FFA500",
-        fillOpacity: 0.06,
+        fillOpacity: 0.006,
       ),
     );
     await _zoomToFeatureBounds(blocksData);
@@ -2170,7 +2233,7 @@ class MapViewState extends State<MapView> {
     required String layerId,
     required Map<String, dynamic> geojsonData,
     required String lineColor,
-    double lineWidth = 2.0,
+    double lineWidth = 2.0, // Default line width increased
   }) async {
     await controller!.addSource(sourceId, GeojsonSourceProperties(data: geojsonData));
     await controller!.addLineLayer(
@@ -2189,7 +2252,7 @@ class MapViewState extends State<MapView> {
     required String layerId,
     required Map<String, dynamic> geojsonData,
     required String fillColor,
-    double fillOpacity = 0.06,
+    double fillOpacity = 0.006,
   }) async {
     await controller!.addSource(sourceId, GeojsonSourceProperties(data: geojsonData));
     await controller!.addFillLayer(
