@@ -884,7 +884,7 @@ class _DashboardPageState extends State<DashboardPage> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF013220), // Very dark green for the AppBar.
         elevation: 2,
-        leadingWidth: 150,
+        leadingWidth: 175,
         leading: _buildUploadButtons(),
         title: Text(
           _searchLabel,
