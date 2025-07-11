@@ -859,7 +859,7 @@ class _DashboardPageState extends State<DashboardPage> {
             style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
           ),
           backgroundColor: const Color(0xFF013220), // Very dark green for the AppBar.
-          leadingWidth: 150,
+          leadingWidth: 175,
           leading: _buildUploadButtons(),
           actions: [_buildDemoDataButton()],
         ),
@@ -1535,17 +1535,17 @@ class _DashboardPageState extends State<DashboardPage> {
               onPressed: () => _uploadGeoJson("blocks"),
             ),
           ),
-          // // Mass Towns upload button.
-          // Tooltip(
-          //   message: "Upload Mass Towns GeoJSON file",
-          //   child: IconButton(
-          //     icon: Icon(
-          //       Icons.cloud_upload,
-          //       color: _uploadedMassTowns ? Colors.lightGreen : Colors.red,
-          //     ),
-          //     onPressed: () => _uploadGeoJson("mass_towns"),
-          //   ),
-          // ),
+          // Mass Towns upload button.
+          Tooltip(
+            message: "Upload Mass Towns GeoJSON file",
+            child: IconButton(
+              icon: Icon(
+                Icons.cloud_upload,
+                color: _uploadedMassTowns ? Colors.lightGreen : Colors.red,
+              ),
+              onPressed: () => _uploadGeoJson("mass_towns"),
+            ),
+          ),
         ],
       ),
     );
