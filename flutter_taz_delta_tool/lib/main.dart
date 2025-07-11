@@ -842,7 +842,7 @@ class _DashboardPageState extends State<DashboardPage> {
         appBar: AppBar(
           title: const Text("VizTAZ Dashboard", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           backgroundColor: const Color(0xFF013220),
-          leadingWidth: 150,
+          leadingWidth: 175,
           leading: _buildUploadButtons(),
           actions: !_filesReady ? [_buildDemoDataButton()] : null,
         ),
