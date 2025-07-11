@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:html' as html; // For web injection and file upload.
+import 'dart:io'; // Required for database path in non-web environments
 import 'dart:math' show Point;
 import 'dart:math' as math; // For math calculations.
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -10,6 +10,105 @@ import 'package:turf/turf.dart' as turf;
 import 'package:r_tree/r_tree.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:archive/archive.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as path;
+
+// Web-specific imports for file upload and Google Maps link,
+// conditionalized because sqflite doesn't directly replace these functions.
+import 'dart:html' as html;
+
+/// Database helper class for SQLite operations.
+class DatabaseHelper {
+  static final DatabaseHelper _instance = DatabaseHelper._internal();
+  factory DatabaseHelper() => _instance;
+  static Database? _database;
+  static const String _tableName = 'geojsons';
+  static const String _dbName = 'taz_dashboard.db';
+
+  DatabaseHelper._internal();
+
+  Future<Database> get database async {
+    if (_database != null) {
+      return _database!;
+    }
+    _database = await _initDatabase();
+    return _database!;
+  }
+
+  Future<Database> _initDatabase() async {
+    // Determine the database path. sqflite requires a platform-specific path.
+    // Note: sqflite is not supported on Flutter Web by default. If running on web,
+    // we'll rely on the existing in-memory/localStorage logic or a web-compatible solution (like IndexedDB, which is not sqflite).
+    // Since the original code used localStorage only for caching GeoJSON, we replace it with sqflite for mobile/desktop environments.
+
+    if (kIsWeb) {
+      // If running on web, return an error or handle accordingly.
+      // For this migration, we'll keep the storage mechanism simple.
+      // If we were using sqflite on web (via sqflite_common_ffi or similar), this would be different.
+      // We will assume that if we are using sqflite, we are not on the web.
+      throw UnsupportedError('SQLite operations are not supported on Flutter web platform with the current setup.');
+    }
+
+    String databasesPath = await getDatabasesPath();
+    String dbPath = path.join(databasesPath, _dbName);
+
+    return openDatabase(
+      dbPath,
+      version: 1,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE $_tableName (
+            key TEXT PRIMARY KEY,
+            geojson_data TEXT
+          )
+        ''');
+      },
+    );
+  }
+
+  /// Inserts or updates GeoJSON data in the SQLite database.
+  Future<void> insertGeoJson(String key, Map<String, dynamic> geojsonData) async {
+    if (kIsWeb) {
+      // If on web, revert to localStorage (or handle with a web-specific storage API)
+      try {
+        html.window.localStorage[key] = jsonEncode(geojsonData);
+      } catch (e) {
+        debugPrint('⚠️ localStorage error on web: $e');
+      }
+      return;
+    }
+
+    final db = await database;
+    await db.insert(
+      _tableName,
+      {'key': key, 'geojson_data': jsonEncode(geojsonData)},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Retrieves GeoJSON data from the SQLite database.
+  Future<Map<String, dynamic>?> getGeoJson(String key) async {
+    if (kIsWeb) {
+      // If on web, retrieve from localStorage
+      if (html.window.localStorage.containsKey(key)) {
+        return jsonDecode(html.window.localStorage[key]!);
+      }
+      return null;
+    }
+
+    final db = await database;
+    final List<Map<String, dynamic>> maps = await db.query(
+      _tableName,
+      where: 'key = ?',
+      whereArgs: [key],
+    );
+
+    if (maps.isNotEmpty) {
+      return jsonDecode(maps.first['geojson_data'] as String);
+    }
+    return null;
+  }
+}
 
 /// Helper: Generate a GeoJSON polygon approximating a circle.
 Map<String, dynamic> createCirclePolygon(turf.Point center, double radius,
@@ -150,10 +249,18 @@ bool isWithinBBoxAndDistance(
   return distance <= radiusKm;
 }
 
-/// Helper: Load and standardize a GeoJSON file from localStorage.
-Map<String, dynamic>? _loadGeoJsonFromLocal(String key, String type) {
-  if (html.window.localStorage.containsKey(key)) {
-    var geojson = jsonDecode(html.window.localStorage[key]!);
+/// Helper: Load and standardize a GeoJSON file from SQLite or localStorage.
+Future<Map<String, dynamic>?> _loadGeoJson(String key, String type) async {
+  final DatabaseHelper dbHelper = DatabaseHelper();
+  Map<String, dynamic>? geojson;
+
+  try {
+    geojson = await dbHelper.getGeoJson(key);
+  } catch (e) {
+    debugPrint('Failed to load GeoJSON from database or localStorage: $e');
+  }
+
+  if (geojson != null) {
     return standardizeGeoJsonProperties(geojson, type);
   }
   return null;
@@ -323,22 +430,14 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    // Check if all four files already exist in local storage.
-    bool allUploaded = html.window.localStorage.containsKey('old_taz_geojson') &&
-        html.window.localStorage.containsKey('new_taz_geojson') &&
-        html.window.localStorage.containsKey('blocks_geojson') &&
-        html.window.localStorage.containsKey('mass_towns_geojson'); // Check for Mass Towns
-    if (allUploaded) {
-      _filesReady = true;
-      _loadCachedData().then((_) {
-        setState(() {
-          _isLoading = false;
-        });
+    // Load data from storage on initialization.
+    _loadCachedData().then((_) {
+      setState(() {
+        // Determine if all files are ready based on whether cached data was loaded.
+        _filesReady = _uploadedOldTaz && _uploadedNewTaz && _uploadedBlocks && _uploadedMassTowns;
+        _isLoading = false;
       });
-    } else {
-      // Do not load main dashboard until all files are uploaded.
-      _isLoading = false;
-    }
+    });
   }
 
   @override
@@ -349,12 +448,19 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   /// Pulls demo data from assets/geojsons.zip, extracts the GeoJSON files,
-  /// standardises their properties, caches them in localStorage + memory, and
+  /// standardises their properties, caches them in SQLite + memory, and
   /// kicks off the normal _loadCachedData() pipeline.
   Future<void> _loadDemoData() async {
+    setState(() {
+      _isProcessingUpload = true;
+    });
+
     try {
       final bytes = await rootBundle.load('assets/geojsons.zip');
       final archive = ZipDecoder().decodeBytes(bytes.buffer.asUint8List());
+      
+      final dbHelper = DatabaseHelper();
+
       for (final file in archive) {
         if (!file.isFile) continue;
         final name = file.name.toLowerCase();
@@ -362,35 +468,30 @@ class _DashboardPageState extends State<DashboardPage> {
         final geo = jsonDecode(utf8.decode(contentBytes)) as Map<String, dynamic>;
 
         String featureType;
-        String localStorageKey;
+        String storageKey;
 
         if (name.endsWith('old_taz.geojson')) {
           featureType = 'old_taz';
-          localStorageKey = 'old_taz_geojson';
+          storageKey = 'old_taz_geojson';
         } else if (name.endsWith('new_taz.geojson')) {
           featureType = 'new_taz';
-          localStorageKey = 'new_taz_geojson';
+          storageKey = 'new_taz_geojson';
         } else if (name.endsWith('blocks.geojson')) {
           featureType = 'blocks';
-          localStorageKey = 'blocks_geojson';
+          storageKey = 'blocks_geojson';
         } else if (name.endsWith('mass_towns.geojson')) { // Handle mass_towns.geojson
           featureType = 'mass_towns';
-          localStorageKey = 'mass_towns_geojson';
+          storageKey = 'mass_towns_geojson';
         } else {
           continue; // Skip unknown files
         }
 
         final standardized = standardizeGeoJsonProperties(geo, featureType);
 
-        // Only try to write to localStorage if the payload is small:
-        if (contentBytes.length <= 5 * 1024 * 1024) {
-          try {
-            html.window.localStorage[localStorageKey] = jsonEncode(standardized);
-          } catch (e) {
-            debugPrint('⚠️ skipping localStorage for $name: $e');
-          }
-        }
-        // Always keep it in memory and flip the upload flag:
+        // Save to SQLite (or localStorage if on web)
+        await dbHelper.insertGeoJson(storageKey, standardized);
+        
+        // Update in-memory cache and upload status flags
         if (featureType == 'old_taz') {
           _cachedOldTaz = standardized;
           _uploadedOldTaz = true;
@@ -400,7 +501,7 @@ class _DashboardPageState extends State<DashboardPage> {
         } else if (featureType == 'blocks') {
           _cachedBlocks = standardized;
           _uploadedBlocks = true;
-        } else if (featureType == 'mass_towns') { // Set cached data for Mass Towns
+        } else if (featureType == 'mass_towns') { 
           _cachedMassTowns = standardized;
           _uploadedMassTowns = true;
         }
@@ -412,7 +513,8 @@ class _DashboardPageState extends State<DashboardPage> {
           _filesReady = true;
           _isLoading = true;
         });
-        await _loadCachedData();
+        // We already loaded data into memory, just build the R-Tree.
+        _buildBlocksIndex();
         setState(() {
           _isLoading = false;
         });
@@ -422,21 +524,35 @@ class _DashboardPageState extends State<DashboardPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Failed to load demo data')),
       );
+    } finally {
+      setState(() {
+        _isProcessingUpload = false;
+      });
     }
   }
 
+  /// Loads data from the database into memory and builds the R-Tree index.
   Future<void> _loadCachedData() async {
-    // Only update the in-memory cache if it's null.
-    _cachedOldTaz ??= _loadGeoJsonFromLocal('old_taz_geojson', "old_taz");
-    if (_cachedOldTaz != null) _uploadedOldTaz = true;
-    _cachedNewTaz ??= _loadGeoJsonFromLocal('new_taz_geojson', "new_taz");
-    if (_cachedNewTaz != null) _uploadedNewTaz = true;
-    _cachedBlocks ??= _loadGeoJsonFromLocal('blocks_geojson', "blocks");
-    if (_cachedBlocks != null) _uploadedBlocks = true;
-    _cachedMassTowns ??= _loadGeoJsonFromLocal('mass_towns_geojson', "mass_towns"); // Load Mass Towns
-    if (_cachedMassTowns != null) _uploadedMassTowns = true;
+    // Load data from SQLite/localStorage and update in-memory cache and flags.
+    final dbHelper = DatabaseHelper();
+
+    _cachedOldTaz = await _loadGeoJson('old_taz_geojson', "old_taz");
+    _uploadedOldTaz = _cachedOldTaz != null;
+
+    _cachedNewTaz = await _loadGeoJson('new_taz_geojson', "new_taz");
+    _uploadedNewTaz = _cachedNewTaz != null;
+
+    _cachedBlocks = await _loadGeoJson('blocks_geojson', "blocks");
+    _uploadedBlocks = _cachedBlocks != null;
+
+    _cachedMassTowns = await _loadGeoJson('mass_towns_geojson', "mass_towns");
+    _uploadedMassTowns = _cachedMassTowns != null;
 
     // Build the R-Tree index for blocks if available.
+    _buildBlocksIndex();
+  }
+
+  void _buildBlocksIndex() {
     if (_cachedBlocks != null && _cachedBlocks!['features'] != null) {
       List<RTreeDatum<dynamic>> items = [];
       for (var feature in _cachedBlocks!['features']) {
@@ -446,7 +562,6 @@ class _DashboardPageState extends State<DashboardPage> {
       _blocksIndex = RTree(16);
       _blocksIndex!.add(items);
     }
-    setState(() {});
   }
 
   /// Creates a bounding box from a single Polygon/MultiPolygon feature.
@@ -732,7 +847,8 @@ class _DashboardPageState extends State<DashboardPage> {
       lat = 42.3601;
       lng = -71.0589;
     }
-    final url = "https://www.google.com/maps/search/?api=1&query=$lat,$lng";
+    // Note: Since this is specific to web functionality, we keep the dart:html usage for `window.open`.
+    final url = "https://www.google.com/maps/@$lat,$lng?zoom=12";
     html.window.open(url, '_blank');
   }
 
@@ -742,6 +858,36 @@ class _DashboardPageState extends State<DashboardPage> {
   String? _massTownsFileName; // Add filename for Mass Towns
 
   void _uploadGeoJson(String type) {
+    if (kIsWeb) {
+      _uploadGeoJsonWeb(type);
+    } else {
+      _showUploadNotSupportedDialog();
+    }
+  }
+
+  // Handle file uploads on non-web platforms (e.g., mobile/desktop)
+  void _showUploadNotSupportedDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text("Upload Not Supported"),
+          content: const Text("File uploads are currently only supported in the web version of the application."),
+          actions: <Widget>[
+            TextButton(
+              child: const Text("OK"),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Web-specific implementation for file upload using dart:html
+  void _uploadGeoJsonWeb(String type) {
     final input = html.FileUploadInputElement()..accept = '.geojson';
     input.click();
     input.onChange.listen((event) async {
@@ -750,31 +896,22 @@ class _DashboardPageState extends State<DashboardPage> {
           _isProcessingUpload = true;
         });
         final file = input.files!.first;
-        // Optionally check file size (in bytes)
-        if (file.size > 5 * 1024 * 1024) { // 5MB threshold
-          debugPrint("File is too large to cache in localStorage; processing in-memory only.");
-        }
         final reader = html.FileReader();
         reader.readAsText(file);
         await reader.onLoad.first;
+        
         Map<String, dynamic> geojsonData =
             jsonDecode(reader.result as String) as Map<String, dynamic>;
 
         // Standardize property names: convert all keys to lowercase (and apply renaming logic)
         geojsonData = standardizeGeoJsonProperties(geojsonData, type);
+        
+        final dbHelper = DatabaseHelper();
+        String storageKey = '${type}_geojson';
 
-        // If the file is small enough, cache it in localStorage.
-        if (file.size <= 5 * 1024 * 1024) {
-          if (type == "old_taz") {
-            html.window.localStorage['old_taz_geojson'] = jsonEncode(geojsonData);
-          } else if (type == "new_taz") {
-            html.window.localStorage['new_taz_geojson'] = jsonEncode(geojsonData);
-          } else if (type == "blocks") {
-            html.window.localStorage['blocks_geojson'] = jsonEncode(geojsonData);
-          } else if (type == "mass_towns") { // Cache Mass Towns
-            html.window.localStorage['mass_towns_geojson'] = jsonEncode(geojsonData);
-          }
-        }
+        // Save to storage (SQLite or localStorage based on platform)
+        await dbHelper.insertGeoJson(storageKey, geojsonData);
+
         // In any case, store it in our in-memory cache and update the file name.
         if (type == "old_taz") {
           _uploadedOldTaz = true;
@@ -797,12 +934,14 @@ class _DashboardPageState extends State<DashboardPage> {
         setState(() {
           _isProcessingUpload = false;
         });
+        
+        // Check if all files are ready and load data.
         if (_uploadedOldTaz && _uploadedNewTaz && _uploadedBlocks && _uploadedMassTowns) {
           setState(() {
             _filesReady = true;
             _isLoading = true;
           });
-          await _loadCachedData();
+          _buildBlocksIndex();
           setState(() {
             _isLoading = false;
           });
