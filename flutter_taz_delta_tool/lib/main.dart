@@ -2126,7 +2126,7 @@ class MapViewState extends State<MapView> {
       layerId: "old_taz_target_fill",
       geojsonData: {'type': 'FeatureCollection', 'features': targetFeatures},
       fillColor: "#fff580",
-      fillOpacity: 1,
+      fillOpacity: 0.45,
     );
 
     // The "other" TAZ polygons within the radius.
