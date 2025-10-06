@@ -9,7 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  maplibre_gl: ^0.20.0
+  maplibre_gl: ^0.24.0
   turf: ^0.0.10
   r_tree: ^3.0.1
   # archive: ^4.0.7
