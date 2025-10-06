@@ -14,3 +14,6 @@
 ### **Notes**
 Ensure proper projection
 gdf = gdf.to_crs(epsg=4326)
+
+### **Build**
+`flutter build web`
